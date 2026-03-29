@@ -1,27 +1,44 @@
 # phone-price-tracker
 
-Python tool to track iPhone 16 prices from Amazon India and Flipkart.
+Track iPhone (or other phone) prices using a clean, modular architecture.
 
-## Features
-- Uses a hardcoded list of product URLs (Amazon India + Flipkart).
-- Extracts current product price from page HTML.
-- Appends each run to a `price_history.csv` file with UTC timestamp.
-- Prints alert if the latest price is below per-product threshold.
+## Architecture
+
+- `config.json`: product definitions (`name`, `url`, `threshold`, plus optional API config)
+- `providers/api_provider.py`: API provider (RapidAPI)
+- `providers/scraper_provider.py`: scraper fallback provider (currently returns `None`)
+- `price_tracker.py`: orchestration, CSV logging, and alerts
+
+## Flow
+
+1. Load products from `config.json`
+2. For each product:
+   - Try API provider first
+   - If API fails, try scraper provider
+3. Normalize provider output to:
+   - `{ "price": float, "source": "api" }`
+   - `{ "price": float, "source": "scraper" }`
+4. Save run to `price_history.csv`
+5. Print alert if price is below threshold
 
 ## Setup
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Environment variable
+
+Set your RapidAPI key:
+
+```bash
+export RAPIDAPI_KEY="your_api_key_here"
+```
+
 ## Run
+
 ```bash
 python price_tracker.py
 ```
-
-## Customize
-Edit `PRODUCTS` in `price_tracker.py` to:
-- update URLs
-- update threshold values
-- add/remove products

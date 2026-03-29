@@ -1,182 +1,131 @@
 #!/usr/bin/env python3
-"""Track mobile phone prices from Amazon India and Flipkart."""
+"""Track mobile phone prices using API-first with scraper fallback."""
 
 from __future__ import annotations
 
 import csv
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Any
+
+from providers.api_provider import ApiProvider
+from providers.scraper_provider import ScraperProvider
 
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-IN,en;q=0.9",
-}
-
-# Hardcoded URLs and thresholds (as requested).
-PRODUCTS = [
-    {
-        "site": "Amazon India",
-        "url": "https://www.amazon.in/dp/B0DGHY9W9W",
-        "threshold": 75000,
-    },
-    {
-        "site": "Flipkart",
-        "url": "https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itm7c0281cd247be",
-        "threshold": 75000,
-    },
-]
-
+CONFIG_FILE = Path("config.json")
 CSV_FILE = Path("price_history.csv")
 
 
 @dataclass
-class PriceResult:
+class PriceRecord:
+    timestamp_utc: str
+    name: str
     site: str
     url: str
-    price_inr: Optional[float]
-    threshold_inr: float
-    fetched_at_utc: str
-    note: str = ""
+    threshold: float
+    price: float | None
+    source: str
+    note: str
 
 
-def _extract_json_ld_prices(html: str) -> list[str]:
-    prices: list[str] = []
-    scripts = re.findall(
-        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html,
-        flags=re.DOTALL | re.IGNORECASE,
+def load_products(config_path: Path = CONFIG_FILE) -> list[dict[str, Any]]:
+    with config_path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    products = data.get("products", [])
+    if not isinstance(products, list):
+        raise ValueError("config.json must contain a list in 'products'")
+    return products
+
+
+def fetch_with_fallback(product: dict[str, Any], api: ApiProvider, scraper: ScraperProvider) -> PriceRecord:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    name = str(product.get("name", "Unnamed Product"))
+    site = str(product.get("site", "unknown"))
+    url = str(product.get("url", ""))
+    threshold = float(product.get("threshold", 0))
+
+    api_result = api.get_price(product)
+    if api_result is not None:
+        return PriceRecord(
+            timestamp_utc=timestamp,
+            name=name,
+            site=site,
+            url=url,
+            threshold=threshold,
+            price=float(api_result["price"]),
+            source="api",
+            note="ok",
+        )
+
+    scraper_result = scraper.get_price(product)
+    if scraper_result is not None:
+        return PriceRecord(
+            timestamp_utc=timestamp,
+            name=name,
+            site=site,
+            url=url,
+            threshold=threshold,
+            price=float(scraper_result["price"]),
+            source="scraper",
+            note="ok",
+        )
+
+    return PriceRecord(
+        timestamp_utc=timestamp,
+        name=name,
+        site=site,
+        url=url,
+        threshold=threshold,
+        price=None,
+        source="none",
+        note="api_failed_and_scraper_failed",
     )
-    for script in scripts:
-        script = script.strip()
-        if not script:
-            continue
-        try:
-            data = json.loads(script)
-        except json.JSONDecodeError:
-            continue
-
-        items = data if isinstance(data, list) else [data]
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            offers = item.get("offers")
-            if isinstance(offers, dict) and "price" in offers:
-                prices.append(str(offers["price"]))
-    return prices
 
 
-def extract_price_text(html: str, site: str) -> Optional[str]:
-    # 1) Try JSON-LD price first.
-    prices = _extract_json_ld_prices(html)
-    if prices:
-        return prices[0]
-
-    # 2) Site-specific regex selectors from raw HTML.
-    patterns_by_site = {
-        "Amazon India": [
-            r'id="priceblock_ourprice"[^>]*>\s*₹?\s*([\d,]+(?:\.\d{1,2})?)',
-            r'id="priceblock_dealprice"[^>]*>\s*₹?\s*([\d,]+(?:\.\d{1,2})?)',
-            r'class="a-price-whole"[^>]*>\s*([\d,]+)',
-        ],
-        "Flipkart": [
-            r'class="Nx9bqj\s+CxhGGd"[^>]*>\s*₹\s*([\d,]+(?:\.\d{1,2})?)',
-            r'class="_30jeq3\s+_16Jk6d"[^>]*>\s*₹\s*([\d,]+(?:\.\d{1,2})?)',
-            r'class="_30jeq3"[^>]*>\s*₹\s*([\d,]+(?:\.\d{1,2})?)',
-        ],
-    }
-
-    for pattern in patterns_by_site.get(site, []):
-        match = re.search(pattern, html, flags=re.IGNORECASE)
-        if match:
-            return match.group(1)
-
-    # 3) Generic fallback.
-    generic = re.search(r"(?:₹|Rs\.?\s?)([\d,]+(?:\.\d{1,2})?)", html)
-    if generic:
-        return generic.group(1)
-
-    return None
-
-
-def normalize_price(price_text: str) -> Optional[float]:
-    cleaned = re.sub(r"[^\d.]", "", price_text)
-    if not cleaned:
-        return None
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-def fetch_price(site: str, url: str, threshold: float) -> PriceResult:
-    now_utc = datetime.now(timezone.utc).isoformat()
-    request = Request(url, headers=HEADERS)
-
-    try:
-        with urlopen(request, timeout=20) as response:
-            html = response.read().decode("utf-8", errors="ignore")
-    except (HTTPError, URLError, TimeoutError) as exc:
-        return PriceResult(site, url, None, threshold, now_utc, note=f"request_error: {exc}")
-
-    price_text = extract_price_text(html, site)
-    if not price_text:
-        return PriceResult(site, url, None, threshold, now_utc, note="price_not_found")
-
-    price = normalize_price(price_text)
-    if price is None:
-        return PriceResult(site, url, None, threshold, now_utc, note=f"price_parse_error: {price_text}")
-
-    return PriceResult(site, url, price, threshold, now_utc)
-
-
-def append_to_csv(results: list[PriceResult], csv_file: Path = CSV_FILE) -> None:
+def append_csv(records: list[PriceRecord], csv_file: Path = CSV_FILE) -> None:
     exists = csv_file.exists()
     with csv_file.open("a", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         if not exists:
-            writer.writerow(["timestamp_utc", "site", "url", "price_inr", "threshold_inr", "note"])
+            writer.writerow(["timestamp_utc", "name", "site", "url", "price", "threshold", "source", "note"])
 
-        for result in results:
+        for r in records:
             writer.writerow(
                 [
-                    result.fetched_at_utc,
-                    result.site,
-                    result.url,
-                    "" if result.price_inr is None else f"{result.price_inr:.2f}",
-                    f"{result.threshold_inr:.2f}",
-                    result.note,
+                    r.timestamp_utc,
+                    r.name,
+                    r.site,
+                    r.url,
+                    "" if r.price is None else f"{r.price:.2f}",
+                    f"{r.threshold:.2f}",
+                    r.source,
+                    r.note,
                 ]
             )
 
 
-def print_alerts(results: list[PriceResult]) -> None:
-    for result in results:
-        if result.price_inr is None:
-            print(f"[WARN] {result.site}: unable to fetch price ({result.note})")
+def print_alerts(records: list[PriceRecord]) -> None:
+    for r in records:
+        if r.price is None:
+            print(f"[WARN] {r.name}: price unavailable (source={r.source}, note={r.note})")
             continue
 
-        print(f"[INFO] {result.site}: ₹{result.price_inr:,.2f} (threshold ₹{result.threshold_inr:,.2f})")
-        if result.price_inr < result.threshold_inr:
-            print(
-                f"[ALERT] Price drop on {result.site}! Current ₹{result.price_inr:,.2f} "
-                f"is below threshold ₹{result.threshold_inr:,.2f}."
-            )
+        print(f"[INFO] {r.name}: ₹{r.price:,.2f} via {r.source} (threshold ₹{r.threshold:,.2f})")
+        if r.price < r.threshold:
+            print(f"[ALERT] {r.name}: price dropped below threshold!")
 
 
 def main() -> None:
-    results = [fetch_price(p["site"], p["url"], p["threshold"]) for p in PRODUCTS]
-    append_to_csv(results)
-    print_alerts(results)
+    products = load_products()
+    api_provider = ApiProvider()
+    scraper_provider = ScraperProvider()
+
+    records = [fetch_with_fallback(product, api_provider, scraper_provider) for product in products]
+    append_csv(records)
+    print_alerts(records)
 
 
 if __name__ == "__main__":
