@@ -1,0 +1,28 @@
+{
+  "products": [
+    {
+      "name": "iPhone 16 128GB (Amazon India)",
+      "site": "amazon",
+      "url": "https://www.amazon.in/iPhone-16-128-GB-Control/dp/B0DGJHBX5Y",
+      "threshold": 75000,
+      "api": {
+        "enabled": true,
+        "url": "https://real-time-amazon-data.p.rapidapi.com/product-details",
+        "host": "real-time-amazon-data.p.rapidapi.com",
+        "params": {
+          "asin": "B0DGJHBX5Y",
+          "country": "IN"
+        }
+      }
+    },
+    {
+      "name": "iPhone 16 128GB (Flipkart)",
+      "site": "flipkart",
+      "url": "https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itm7c0281cd247be",
+      "threshold": 75000,
+      "api": {
+        "enabled": false
+      }
+    }
+  ]
+}
