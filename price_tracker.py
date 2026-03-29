@@ -16,7 +16,7 @@ from providers.scraper_provider import ScraperProvider
 
 CONFIG_FILE = Path("config.json")
 CSV_FILE = Path("price_history.csv")
-
+NEW_VAR = 100
 
 @dataclass
 class PriceRecord:
